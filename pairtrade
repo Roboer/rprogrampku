@@ -1,6 +1,6 @@
-购买（出售）量 = MaxPos / lvls
+#购买（出售）量 = MaxPos / lvls
 
-# 资产B购买（出售）量 = MaxPos * Ratio / lvls  
+#资产B购买（出售）量 = MaxPos * Ratio / lvls  
 
 
 
