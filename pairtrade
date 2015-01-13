@@ -1,0 +1,433 @@
+购买（出售）量 = MaxPos / lvls
+
+# 资产B购买（出售）量 = MaxPos * Ratio / lvls  
+
+
+
+require(quantstrat)
+
+
+
+suppressWarnings(rm("order_book.pair1",pos=.strategy))
+
+suppressWarnings(rm("account.pairs", "portfolio.pair1", pos=.blotter))
+
+suppressWarnings(rm("initDate", "endDate", "startDate", "initEq", "SD", "N", 
+
+                    "symb1", "symb2", "portfolio1.st", "account.st", 
+
+                    "pairStrat", "out1"))
+
+
+
+
+
+initDate <- '2014-01-01'    
+
+endDate <- '2015-01-05'
+
+startDate <- '2014-01-02'
+
+initEq <- 100000
+
+SD <- 2
+
+N <- 20
+
+
+
+MaxPos <- 1500  #资产A的最大持有量；资产B的最大持有量为 max * ratio
+
+
+
+lvls <- 3  #定义回撤次数; 每次订单数量为 = MaxPos/lvls
+
+
+
+symb1 <- 'SPY' 
+
+symb2 <- 'DIA' 
+
+
+
+portfolio1.st <- 'pair1'
+
+account.st <- 'pairs'
+
+
+
+getSymbols(c(symb1, symb2), from=startDate, to=endDate, adjust=TRUE) 
+
+
+
+# 确定输入正确的symb 
+
+alignSymbols <- function(symbols, env=.GlobalEnv) {
+
+  if (length(symbols) < 2) 
+
+    stop("Must provide at least 2 symbols")
+
+  if (any(!is.character(symbols))) 
+
+    stop("Symbols must be vector of character strings.")
+
+  ff <- get(symbols[1],env=env)
+
+  for (sym in symbols[-1]) {
+
+    tmp.sym <- get(sym,env=env)
+
+    ff <- merge(ff, tmp.sym, all=FALSE)
+
+  }
+
+  for (sym in symbols) {
+
+    assign(sym,ff[,grep(sym, colnames(ff))], env=env)
+
+  }
+
+  symbols
+
+}
+
+alignSymbols(c(symb1, symb2))
+
+
+
+# 定义交易工具
+
+currency("USD")                                 # 交易货币为美元
+
+stock(symb1, currency="USD", multiplier=1)
+
+stock(symb2, currency="USD", multiplier=1)
+
+
+
+# 初始化资产组合，账户，订单
+
+initPortf(name=portfolio1.st, c(symb1,symb2), initDate=initDate)
+
+initAcct(account.st, portfolios=portfolio1.st, initDate=initDate, initEq=initEq)
+
+initOrders(portfolio=portfolio1.st, initDate=initDate)
+
+
+
+pair <- c(1, 2, MaxPos, lvls)
+
+names(pair) <- c(symb1, symb2, "MaxPos", "lvls")
+
+.blotter[[paste('portfolio', portfolio1.st, sep='.')]]$pair <- pair
+
+
+
+
+
+addPosLimit(portfolio=portfolio1.st, timestamp=initDate, symbol=symb1, 
+
+            maxpos=MaxPos, longlevels=lvls, minpos=-MaxPos, shortlevels=lvls)
+
+addPosLimit(portfolio=portfolio1.st, timestamp=initDate, symbol=symb2, 
+
+            maxpos=MaxPos, longlevels=lvls, minpos=-MaxPos, shortlevels=lvls)
+
+
+
+# 创建一个策略
+
+pairStrat <- strategy('pairStrat')
+
+
+
+# 指标函数
+
+calcRatio <- function(x) { 
+
+  #返回两个资产收盘价比率
+
+  x1 <- get(x[1])
+
+  x2 <- get(x[2])
+
+  mult1 <- getInstrument(x[1])$multiplier
+
+  mult2 <- getInstrument(x[2])$multiplier
+
+  rat <- (mult1 * Cl(x1)) / (mult2 * Cl(x2))
+
+  colnames(rat) <- 'Ratio'
+
+  rat
+
+}
+
+# 决定进入/退出的交易信号
+
+Ratio <- calcRatio(c(symb1[1], symb2[1]))  
+
+
+
+# 将对冲比率存储在portfolio变量中
+
+.blotter[[paste('portfolio',portfolio1.st,sep='.')]]$HedgeRatio <- Ratio
+
+
+
+#得到最新都对冲比率
+
+getHedgeRatio <- function(portfolio, timestamp) {
+
+  portf <- getPortfolio(portfolio)
+
+  timestamp <- format(timestamp,"%Y-%m-%d %H:%M:%S")
+
+  toDate <- paste("::", timestamp, sep="")
+
+  Ratio <- last(portf$HedgeRatio[toDate])
+
+  as.numeric(Ratio)
+
+}
+
+
+
+# 构建一个指标 - 基于比率的布林带
+
+pairStrat <- add.indicator(strategy=pairStrat, name = "calcRatio", 
+
+                           arguments=list(x=c(symb1,symb2)))
+
+pairStrat <- add.indicator(strategy=pairStrat, name = "BBands", 
+
+                           arguments=list(HLC=quote(Ratio), sd=SD, n=N, 
+
+                                          maType='SMA'))
+
+
+
+#产生信号，当从下端穿过布林带下方时买入；从布林带上端交叉时卖出；
+
+pairStrat <- add.signal(strategy=pairStrat, name="sigCrossover", 
+
+                        arguments=list(columns=c("Ratio","up"), 
+
+                                        relationship="lt"),
+
+                        label="cross.up")
+
+pairStrat <- add.signal(strategy=pairStrat, name="sigCrossover", 
+
+                        arguments=list(columns=c("Ratio","dn"), 
+
+                                        relationship="gt"), 
+
+                        label="cross.dn")
+
+pairStrat <- add.signal(strategy=pairStrat, name="sigCrossover", 
+
+                        arguments=list(columns=c("Ratio","mavg"), 
+
+                                  relationship="lt"), 
+
+                        label="cross.mid.fa")
+
+pairStrat <- add.signal(strategy=pairStrat, name="sigCrossover", 
+
+                        arguments=list(columns=c("Ratio","mavg"), 
+
+                                       relationship="gt"), 
+
+                        label="cross.mid.fb")
+
+
+
+# 定义订单数量函数
+
+osSpreadMaxPos <- function (data, timestamp, orderqty, ordertype, orderside, 
+
+                            portfolio, symbol, ruletype, ..., orderprice) {
+
+  portf <- getPortfolio(portfolio)
+
+  if (!any(portf$pair == 1) && !(any(portf$pair == 2))) 
+
+    stop('pair must contain both values 1 and 2')
+
+  if (!any(names(portf$pair) == "MaxPos") || !any(names(portf$pair) == "lvls")) 
+
+    stop('pair must contain MaxPos and lvls')  
+
+    
+
+  if (portf$pair[symbol] == 1) legside <- "long"
+
+  if (portf$pair[symbol] == 2) legside <- "short"  
+
+  MaxPos <- portf$pair["MaxPos"]
+
+  lvls <- portf$pair["lvls"]
+
+  ratio <- getHedgeRatio(portfolio, timestamp)
+
+  pos <- getPosQty(portfolio, symbol, timestamp)       
+
+  PosLimit <- getPosLimit(portfolio, symbol, timestamp) 
+
+  qty <- orderqty
+
+  if (legside == "short") { 
+
+    addPosLimit(portfolio=portfolio, timestamp=timestamp, symbol=symbol, 
+
+                maxpos=round(MaxPos*ratio,0), longlevels=lvls, 
+
+                minpos=round(-MaxPos*ratio,0), shortlevels=lvls)
+
+  
+
+    qty <- -orderqty #switch orderqty for Stock B
+
+  }
+
+  
+
+  if (qty > 0) orderside = 'long'
+
+  if (qty < 0) orderside = 'short'
+
+ 
+
+  orderqty <- osMaxPos(data=data,timestamp=timestamp, orderqty=qty,
+
+                       ordertype=ordertype, orderside=orderside,
+
+                       portfolio=portfolio, symbol=symbol, ruletype=ruletype, 
+
+                       ...)
+
+          
+
+  #Add the order here instead of in the ruleSignal function
+
+  if (!is.null(orderqty) & !orderqty == 0 & !is.null(orderprice)) {
+
+    addOrder(portfolio=portfolio, symbol=symbol, 
+
+             timestamp=timestamp, qty=orderqty, price=as.numeric(orderprice), 
+
+             ordertype=ordertype, side=orderside, replace=FALSE,
+
+             status="open", ...=...)
+
+  }
+
+  return(0) 
+
+}
+
+
+
+
+
+# 定义买进和卖出规则
+
+pairStrat <- add.rule(strategy=pairStrat, name='ruleSignal', 
+
+                      arguments=list(sigcol="cross.dn", sigval=TRUE, 
+
+                                     orderqty=1e6, ordertype='market', 
+
+                                     orderside=NULL, osFUN='osSpreadMaxPos'), 
+
+                      type='enter')
+
+pairStrat <- add.rule(strategy=pairStrat, name='ruleSignal', 
+
+                      arguments=list(sigcol="cross.up", sigval=TRUE, 
+
+                                     orderqty=-1e6, ordertype='market', 
+
+                                     orderside=NULL, osFUN='osSpreadMaxPos'), 
+
+                      type='enter')
+
+pairStrat <- add.rule(strategy=pairStrat, name='ruleSignal', 
+
+                      arguments=list(sigcol="cross.mid.fb", sigval=TRUE, 
+
+                                     orderqty='all', ordertype='market', 
+
+                                     orderside=NULL), 
+
+                      type='exit')
+
+pairStrat <- add.rule(strategy=pairStrat, name='ruleSignal', 
+
+                      arguments=list(sigcol="cross.mid.fa", sigval=TRUE, 
+
+                                     orderqty='all', ordertype='market', 
+
+                                     orderside=NULL), 
+
+                      type='exit')
+
+
+
+out1<-applyStrategy(strategy=pairStrat, portfolios=portfolio1.st)
+
+
+
+updatePortf(Portfolio=portfolio1.st,
+
+            Dates=paste("::", as.Date(Sys.time()), sep=''))
+
+updateAcct(account.st, Dates=paste(startDate, endDate, sep="::")) 
+
+updateEndEq(account.st, Dates=paste(startDate, endDate, sep="::"))
+
+getEndEq(account.st, Sys.time())
+
+
+
+#结果展示
+
+dev.new()
+
+chart.Posn(Portfolio=portfolio1.st, Symbol=symb1)
+
+dev.new()
+
+chart.Posn(Portfolio=portfolio1.st, Symbol=symb2)
+
+dev.new()
+
+chartSeries(Cl(get(symb1))/Cl(get(symb2)), TA="addBBands(n=N,sd=SD)")
+
+
+
+ret1 <- PortfReturns(account.st)
+
+ret1$total <- rowSums(ret1)
+
+#ret1
+
+
+
+if("package:PerformanceAnalytics" %in% search() || 
+
+   require("PerformanceAnalytics",quietly=TRUE)) {
+
+#  getSymbols("SPY", from='1999-01-01')
+
+#  SPY.ret <- Return.calculate(SPY$SPY.Close)
+
+#  tmp <- merge(SPY.ret,ret1$total,all=FALSE)
+
+  dev.new()
+
+  charts.PerformanceSummary(ret1$total, geometric=FALSE, wealth.index=TRUE)
+
+}
